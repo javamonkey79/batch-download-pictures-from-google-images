@@ -5,6 +5,8 @@ Nickolay Nonard <kelciour@gmail.com>
 """
 
 import json
+import traceback
+
 import requests
 import time
 import io
@@ -39,7 +41,7 @@ warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 
 
 headers = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.67 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.67 Safari/537.36"
 }
 
 
@@ -51,6 +53,9 @@ def updateNotes(browser, nids):
     d = QDialog(browser)
     frm = Ui_Dialog()
     frm.setupUi(d)
+
+    icon = os.path.join(os.path.dirname(__file__), "icons", "google.ico")
+    d.setWindowIcon(QIcon(icon))
 
     config = mw.addonManager.getConfig(__name__)
 
@@ -181,13 +186,8 @@ def updateNotes(browser, nids):
     config["Search Queries"] = sq
     mw.addonManager.writeConfig(__name__, config)
 
-    def sleep(seconds):
-        start = time.time()
-        while time.time() - start < seconds:
-            time.sleep(0.01)
-            QApplication.instance().processEvents()
-
     def updateField(nid, fld, images, overwrite):
+        print(nid, fld, images, overwrite)
         if not images:
             return
         imgs = []
@@ -226,6 +226,18 @@ def updateNotes(browser, nids):
                     continue
 
                 def getImages(nid, fld, html, img_width, img_height, img_count, fld_overwrite):
+
+                    def json_full_search(lookup_val, json_dict, search_result = []):
+                        if type(json_dict) == dict:
+                            for key, value in  json_dict.items():
+                                json_full_search(lookup_val, value, search_result)
+                        elif type(json_dict) == list:
+                            for element in json_dict:
+                                json_full_search(lookup_val, element, search_result)
+                        elif type(json_dict) == str and lookup_val in json_dict:
+                            search_result.append(json_dict)
+                        return search_result
+
                     soup = BeautifulSoup(html, "html.parser")
                     rg_meta = soup.find_all("div", {"class": "rg_meta"})
                     metadata = [json.loads(e.text) for e in rg_meta]
@@ -238,14 +250,23 @@ def updateNotes(browser, nids):
                         for txt in re.findall(regex, html):
                             data = json.loads(txt)
 
-                            try:
-                                for d in data[31][0][12][2]:
-                                    try:
-                                        results.append(d[1][3][0])
-                                    except Exception as e:
-                                        pass
-                            except Exception as e:
-                                pass
+                            jpgs = json_full_search('.jpg', data)
+                            print(jpgs)
+                            if jpgs and len(jpgs) > 0:
+                                results.append(jpgs[0])
+
+                            # try:
+                            #     for d in data[31][0][12][2]:
+                            #         try:
+                            #             results.append(d[1][3][0])
+                            #         except Exception as e:
+                            #             print(traceback.format_exc())
+                            #             pass
+                            # except Exception as e:
+                            #     # print(json.dumps(data))
+                            #     print(traceback.format_exc())
+                            #     print(e)
+                            #     pass
 
                     cnt = 0
                     images = []
@@ -253,6 +274,7 @@ def updateNotes(browser, nids):
                         try:
                             r = requests.get(url, headers=headers, timeout=15)
                             r.raise_for_status()
+                            print(f"{url} -- {r}")
                             data = r.content
                             if 'text/html' in r.headers.get('content-type', ''):
                                 continue
@@ -285,8 +307,8 @@ def updateNotes(browser, nids):
                                     cmd = [mpv_executable, tmp_path, "-vf", "lavfi=[scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease:flags=lanczos]".format(img_width, img_height), "-o", img_path]
                                     with noBundledLibs():
                                         p = subprocess.Popen(cmd, startupinfo=si, stdin=subprocess.PIPE,
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                            env=env)
+                                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                                             env=env)
                                     if p.wait() == 0:
                                         with open(img_path, 'rb') as f:
                                             buf.write(f.read())
@@ -297,15 +319,22 @@ def updateNotes(browser, nids):
                             cnt += 1
                             if cnt == img_count:
                                 break
-                        except requests.exceptions.RequestException:
+                        except requests.exceptions.RequestException as req_e:
+                            print(traceback.format_exc())
+                            print(req_e)
                             pass
-                        except UnidentifiedImageError:
+                        except UnidentifiedImageError as uie:
+                            print(traceback.format_exc())
+                            print(uie)
                             pass
                         except UnicodeError as e:
                             # UnicodeError: encoding with 'idna' codec failed (UnicodeError: label empty or too long)
                             # https://bugs.python.org/issue32958
                             if str(e) != "encoding with 'idna' codec failed (UnicodeError: label empty or too long)":
                                 raise
+                            else:
+                                print(traceback.format_exc())
+                                print(e)
                     return (nid, fld, images, fld_overwrite)
 
                 w = re.sub(r'</?(b|i|u|strong|span)(?: [^>]+)>', '', w)
@@ -325,26 +354,15 @@ def updateNotes(browser, nids):
 
                 query = q["URL"].replace("{}", w)
 
-                retry_cnt = 0
-                while True:
-                    try:
-                        r = requests.get("https://www.google.com/search?tbm=isch&q={}&safe=active".format(query), headers=headers, timeout=15)
-                        r.raise_for_status()
-                        future = executor.submit(getImages, nid, df, r.text, q["Width"], q["Height"], q["Count"], q["Overwrite"])
-                        jobs.append(future)
-                        break
-                    except requests.exceptions.RequestException as e:
-                        if retry_cnt == 3:
-                            raise
-                        retry_cnt += 1
-                        if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429:
-                            mw.progress.update(f"Sleeping for {retry_cnt * 30} seconds...")
-                            sleep(retry_cnt * 30)
-                        elif isinstance(e, (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError)):
-                            mw.progress.update(f"Sleeping for {retry_cnt * 5} seconds...")
-                            sleep(retry_cnt * 5)
-                        else:
-                            raise
+                try:
+                    fmt_query = "https://www.google.com/search?tbm=isch&q={}&safe=active".format(query)
+                    r = requests.get(fmt_query, headers=headers, timeout=15)
+                    r.raise_for_status()
+                    print(f"{fmt_query} -- {r}")
+                    future = executor.submit(getImages, nid, df, r.text, q["Width"], q["Height"], q["Count"], q["Overwrite"])
+                    jobs.append(future)
+                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                    pass
 
             done, not_done = concurrent.futures.wait(jobs, timeout=0)
             for future in done:
